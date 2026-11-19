@@ -1,106 +1,188 @@
-% ------------------- Variables -------------------------
+function [s_to, t_to, v_max, v_to] = simulate_aircraft(c, show_plots)
 
-% ------ Plane ------
-m = 2.324; %mass kg
-c = 0.25; %chord m
+if nargin < 1
+        clc; close all;
+        c = 0.25; % Change chord here
+end
+if nargin < 2
+    show_plots = true;
+end
+
+% ======== Assumptions ========
+
+% ====== wing
 b = 1.1; % Wingspan m
-S = b*c; %Planfrom wing aera m^2
-Cl = 1.35; %lift coeff
-Re = 316181; %Reynolds Number
-Vol = 0.0175; % Fuselage Volume
+rho_wing = 38.15; %density of foam
+avg_thick = 0.08; % as % of chord
+max_thick = 0.117;
+Cl_max = 1.4; %max lift coef
+Cl_roll = 0.6; % assumes rig angle of 2deg
 
-Cf = 0.455*(log10(Re))^-2.58; %Cd for skin friction, from myplace doc
+% ====== mass
+mass_non_wing = 1.33; % empty mass w/o wing or golf balls
+mass_ball = 0.046;
+n_ball = 20; % number of balls carried
 
-Components = [ % [Profile Area (m^2), Cd]
-    0.00915 0.062; % Wing
-    0.002 1.4; % Undercarriage
-    0.0004 0.6; % Wheel
-    0.02475 Cf; % Skin Friction (use wetted area)
-    Vol (0.0273*Vol^0.666666)/0.275; % Fuselage
-    0.0017 1.4]; % Tail Profile
+% ====== Body
+Vol = 0.043; % Fuselage Volume
+A_w_body = 0.68; % Wetted area w/o wing (m^2)
+W_fus = 0.4; %width of fuselage (m)
 
-% ------ Environmental ------
-mu = 0.35; %grass friction
-g = 9.81;
-rho = 1.225; % kg/m^3
+% ===== Environment
+mu = 0.0000182; %Dynamic viscocity
+fric = 0.35; %grass friction coeff
+rho = 1.225; % Air density (kg/m^3)
+g = 9.81; % Gravitational acceleration (m/s^2)
 
-% ------ Derived ------
-AR = b/c; %aspect ratio
-Cd0 = sum(prod(Components, 2)) / S; %parasitic drag
+% ========== Chord dependant ==========
 
+S = b*c; % Planfrom aera m^2
+AR = b/c;
+mass_wing = rho_wing*S*c*avg_thick*1.2; %1.2 to account for extra spar
+% Scale 2D airfoil Cl values for 3D wingtip losses:
+
+m = mass_non_wing + n_ball * mass_ball + mass_wing; %total mass
+
+A_f = max_thick*S; %wing front profile area
+A_w = A_w_body + 2*sqrt(1 + max_thick^2)*c*(b - W_fus) + W_fus*c; %Wing wetted area
 e = 1.78*(1-0.045*AR^0.68)-0.64; %osawald eff factor approximation
 K = 1/(pi*AR*e);
 
-C_induced = K*Cl^2; % Induced Drag
+v_stall = sqrt((m*g)/(0.5*rho*S*Cl_max));
+v_to = 1.2*v_stall;
 
-V_stall = sqrt((m*g)/(0.5*rho*S*Cl));
-V_takeoff = 1.2*V_stall;
+Components = [ % [Profile Area (m^2), Cd]
+    A_f 0.062; % Wing
+    0.002 1.4; % Undercarriage
+    0.0004*3 0.6; % Wheel*3
+    Vol^(2/3) (0.04*Vol^(2/3))/S; % Fuselage
+    0.0017 1.4]; % Tail Profile
+Cd0_i = sum(prod(Components, 2)) / S; %parasitic drag
 
-% ------ Thrust & Velocity ------
-dt = 0.05; % time step
-
-T = @(V) -0.003036 * V.^2 - 0.4814 * V + 18.8; %A, B, C from prop crve
-
-L = @(V) 0.5 * rho * V.^2 * S * Cl;
-D = @(V) 0.5 * rho * V.^2 * S * (Cd0 + C_induced);
-N = @(V) max(0, m*g - L(V)); % set normal force to 0 after lift off
-
-delV = @(V) ( (T(V) - mu*N(V) - D(V)) / m ) * dt;
-
-% ------------------- Simulation -------------------------
-
-%initial conditions
-
-V = 0; 
-s = 0; %distance
+% ========== sim setup
+time = 20; % (simulation time (s))
+dt = 0.1;
+v = 0.01;
 t = 0;
+s = 0;
 
-n = ceil(10/dt); %number of iteraitons
+s_to = 0; t_to = 0;
 
-output = zeros(n, 3);
+takeoff = false;
+
+n = time/dt;
+output = zeros(n, 4);
+
+% =============== Simulation Loop ===============
+for i = 1:n
+
+    % ========== chord dependant
+
+    Re = (rho*v*c)/mu;
+    C_f = 0.455*(log10(Re))^-2.58; %Cd for skin friction, from myplace doc
+    Cd0 = Cd0_i + A_w*C_f/S; % add skin friction
+
+    T = -0.003036 *v^2 - 0.4814 *v + 18.8;
 
 
-for i = 2:n
-    dV = delV(V);
-    V = V + dV;
-    s = s + V*dt;
+    if ~takeoff
+        if v >= v_to
+            takeoff = true;
+            s_to = s; t_to = t; Re_to = Re;
+            Cl = (m * g) / (0.5 * rho * v^2 * S); % find c_l required
+        else
+            Cl = Cl_roll;
+        end
+    else
+        % Find Cl required for level flight
+        Cl = (m * g) / (0.5 * rho * v^2 * S);
+    end
+
+    L = 0.5 * rho * v^2 * S * Cl;
+    N = (m*g - L)*(~takeoff); %
+    D = 0.5 * rho * v^2 * S * (Cd0 + K * Cl^2);
+    
+    F_x = T - D - fric*N;
+    a_x = F_x/m;
+
+    s = s + v*dt + 0.5*a_x*dt^2;
+    v = v + a_x*dt;
     t = t + dt;
-    output(i, :) = [t V s];
+
+    output(i, :) = [t v s Cl];
 end
 
-figure
-tiledlayout(2,2)
+v_max = max(output(:, 2));
 
-idx_to = find(output(:,2) >= V_takeoff, 1, 'first');
-t_to   = output(idx_to, 1); % Time at takeoff [s]
-s_to   = output(idx_to, 3); % Distance at takeoff [m]
+% =============== Plotting & Console Summary ===============
+if show_plots
+    fprintf('================ SIMULATION RESULTS ================\n');
+    fprintf('Chord (c):          %.3f m  (AR = %.2f, S = %.3f m^2)\n', c, AR, S);
+    fprintf('Total Mass (m):     %.3f kg (Wing: %.3f kg)\n', m, mass_wing);
+    fprintf('Stall Speed:        %.2f m/s\n', v_stall);
+    fprintf('Takeoff Speed:      %.2f m/s\n',  v_to);
+    fprintf('Takeoff Time:       %.2f s\n', t_to);
+    fprintf('Takeoff Distance:   %.2f m\n', s_to);
+    fprintf('Max Speed (v_max):  %.2f m/s\n [Note: this is unrealistic]', v_max);
+    fprintf('Takeoff Reynolds    %.2f\n', Re_to);  
+    fprintf('Max Reynolds:       %.2f\n', Re);
+    fprintf('====================================================\n');
 
-% --- Velocity vs Time ---
-nexttile
-plot(output(:,1), output(:,2)); hold on
-xline(t_to, '--r', 'Takeoff');
-yline(V_takeoff, ':k', 'V_{takeoff}');           
-xlabel('Time (s)');
-ylabel('Velocity (m/s)');
-title('Velocity vs. Time');
-grid on;
+    figure('Name', sprintf('Aircraft Simulation (c = %.2f m)', c), 'Position', [100 100 1000 700]);
+    tiledlayout(2, 2);
 
-% --- Velocity vs Distance ---
-nexttile
-plot(output(:,3), output(:,2), '-'); hold on
-xline(s_to, '--r', 'Takeoff');
-yline(V_takeoff, ':k', 'V_{takeoff}');
-xlabel('Distance (m)');
-ylabel('Velocity (m/s)');
-title('Velocity vs. Distance');
-grid on;
+    % --- 1. Velocity vs Time ---
+    nexttile
+    plot(output(:,1), output(:,2), 'LineWidth', 1.5); hold on;
+    if ~isnan(t_to)
+        xline(t_to, '--r', sprintf('Takeoff (%.2f s)', t_to));
+        yline( v_to, ':w', sprintf('V_{to} = %.1f m/s',  v_to));
+    end
+    yline(v_max, '-.g', sprintf('V_{max} = %.1f m/s', v_max));
+    xlabel('Time (s)');
+    ylabel('Velocity (m/s)');
+    title('Velocity vs. Time');
+    grid on;
 
-% --- Distance vs Time ---
-nexttile
-plot(output(:,1), output(:,3), '-'); hold on
-xline(t_to, '--r', 'Takeoff');
-yline(s_to, ':k', sprintf('%.1f m', s_to));      
-xlabel('Time (s)');
-ylabel('Distance (m)');
-title('Distance vs. Time');
-grid on;
+    % --- 2. Velocity vs Distance ---
+    nexttile
+    plot(output(:,3), output(:,2), 'LineWidth', 1.5); hold on;
+    if ~isnan(s_to)
+        xline(s_to, '--r', sprintf('s_{to} = %.2f m', s_to));
+        yline( v_to, ':w', 'V_{takeoff}');
+        xlim([0, max(20, s_to * 3)]); % Zoom to show takeoff roll + initial climb clearly
+    end
+    yline(v_max, '-.g', 'V_{max}');
+    xlabel('Distance (m)');
+    ylabel('Velocity (m/s)');
+    title('Velocity vs. Distance');
+    grid on;
+
+    % --- 3. Distance vs Time ---
+    nexttile
+    plot(output(:,1), output(:,3), 'LineWidth', 1.5); hold on;
+    if ~isnan(t_to)
+        xline(t_to, '--r', 'Takeoff');
+        yline(s_to, ':w', sprintf('%.2f m', s_to));
+        xlim([0, max(5, t_to * 2.5)]);
+        ylim([0, max(20, s_to * 3)]);
+    end
+    xlabel('Time (s)');
+    ylabel('Distance (m)');
+    title('Distance vs. Time');
+    grid on;
+
+    % --- 4. Acceleration vs Time (Bonus diagnostic tile) ---
+    nexttile
+    plot(output(:,2), output(:,4), 'LineWidth', 1.5); hold on;
+    if ~isnan(v_to)
+        xline(v_to, '--r', 'Takeoff');
+    end
+    yline(0, ':w');
+    xlabel('Velocity (m/s)');
+    ylabel('Cl');
+    title('Cl vs. Vel');
+    grid on;
+end
+
+end
